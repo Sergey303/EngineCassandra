@@ -9,7 +9,16 @@ namespace EngineCassandra
 {
     public class EngineCassandra : Engine
     {
-        public static List<string> inversesTypes;
+        public static List<string> inversesTypes=null;
+        public XElement Ontology = null;
+        public EngineCassandra()
+        {
+            Ontology = XElement.Load(@"C:\Users\Сергей\Documents\GitHub\EngineCassandra\ontology_iis-v10-doc_ruen.xml");
+            inversesTypes =
+                Ontology.Elements("ObjectProperty")
+                        .Select(objProp => objProp.Attribute(ONames.rdfabout).Value.Split('/').Last())
+                        .ToList();
+        }
         class FormatDictionaries
         {
             public Dictionary<string, XElement> Fields { get; set; }
@@ -22,7 +31,7 @@ namespace EngineCassandra
                                .ToDictionary(f => f.Attribute("prop").Value.Split('/').Last());
                 Directs = formatRecord.Elements("direct")
                                 .ToDictionary(f => f.Attribute("prop").Value.Split('/').Last(), f=> new FormatDictionaries(f.Elements().First()));
-                Inverses = formatRecord.Elements("direct")
+                Inverses = formatRecord.Elements("inverse")
                                  .ToDictionary(f => f.Attribute("prop").Value.Split('/').Last(), f => new FormatDictionaries(f.Elements().First()));
             }
         }
@@ -99,7 +108,7 @@ namespace EngineCassandra
                 //  string temp;
                 // var rows = db.ExecuteQuery(temp = string.Format("SELECT * FROM rdf WHERE KEY=='{0} or " + string.Join(" ", inversesTypes.Select(t => t + "={0}")), id));
                 //var rows = db.ExecuteQuery(temp = string.Format("SELECT * FROM rdf WHERE " + string.Join(" ", inversesTypes.Select(t => t + "={0}")), id));
-             string property;  
+             string property=null;  
               
                 xResult.Add(
                     cfRDF.Where(r => inversesTypes.Any(type => r[type] == id))
@@ -109,9 +118,9 @@ namespace EngineCassandra
             }
             return xResult;
         }
-        }
-
-        private static KeyValuePair<XElement, string> XmlRdf2Format(CassandraColumnFamily columnFamyly, ICqlRow row, FormatDictionaries format = null, string exceptedId = null, bool withDirect = false)
+       
+        private static KeyValuePair<XElement, string> XmlRdf2Format(CassandraColumnFamily columnFamyly, ICqlRow row, FormatDictionaries format = null, string exceptedId = null, bool withDirect = false,
+          Dictionary<string, FormatDictionaries> parentFormatInverses=null)
         {
             var type = row["type"];
             XElement xitem, xResult = new XElement("record", new XAttribute("fid", type), new XAttribute("type", "http://fogid.net/o/"+type));           
@@ -129,7 +138,20 @@ namespace EngineCassandra
                            
             XElement xPropDefinition;
             FormatDictionaries directProperty;
-            if (format == null) format = Formats[type];
+            if (format == null)
+                if (exceptedId == null)
+                    format = Formats[type];
+                else
+                {
+                    XAttribute resource=null;
+                    var excludedXProperty = xitem.Elements().FirstOrDefault(xProperty => (resource = xProperty.Attribute(ONames.rdfresource)) != null
+                                                                 &&
+                                                                 resource.Value == exceptedId);
+                    if (excludedXProperty == null 
+                        || parentFormatInverses==null 
+                        || !parentFormatInverses.TryGetValue(excludedProperty = excludedXProperty.Name.ToString(), out format)) 
+                        format = Formats[type];
+                }
             foreach (var xProperty in xitem.Elements())
             {                  
                 XAttribute resource = xProperty.Attribute(ONames.rdfresource);
@@ -145,8 +167,8 @@ namespace EngineCassandra
                 {
                     if (withDirect)
                     {                        
-                        if (resource.Value == exceptedId) { excludedProperty = xProperty.Name.ToString(); }
-                        else
+                        
+                        
                         {    
                             if (format.Directs.TryGetValue(xProperty.Name.ToString(), out directProperty))
                             {
@@ -167,26 +189,29 @@ namespace EngineCassandra
 
         public override XElement GetItemById(string id, XElement format)
         {
-            var cfRDF = db.GetColumnFamily("rdf");
-            var iRow = cfRDF.FirstOrDefault(roww => roww.Key == id);
-            var type = iRow["type"];
-
-            XElement xResult = XmlRdf2Format(iRow).Key;
-
-            if (addinverse)
+            using (var db = new CassandraContext("rdf", "localhost"))
             {
-                string temp;
-                // var rows = db.ExecuteQuery(temp = string.Format("SELECT * FROM rdf WHERE KEY=='{0} or " + string.Join(" ", inversesTypes.Select(t => t + "={0}")), id));
-                var rows = db.ExecuteQuery(temp = string.Format("SELECT * FROM rdf WHERE " + string.Join(" ", inversesTypes.Select(t => t + "={0}")), id));
-                temp = "";
-                foreach (var inversePair in rows.Select(row => XmlRdf2Format(row, exceptedId: id)))
-                {
-                    xResult.Add(new XElement("inverse", new XAttribute("prop", "http://fogid.net/o/" + inversePair.Value),
-                        inversePair.Key));
-                }
+                var cfRDF = db.GetColumnFamily("rdf");
+                var iRow = cfRDF.FirstOrDefault(roww => roww.Key == id);
+                //var type = iRow["type"];
+                var formatDictionaries = new FormatDictionaries(format);//Formats[type];
+                XElement xResult = XmlRdf2Format(cfRDF, iRow, formatDictionaries).Key;
+
+
+                foreach (
+                    var inversePair in
+                        cfRDF.Where(row => formatDictionaries.Inverses.Any(typeFormat => row[typeFormat.Key] == id))
+                             .Select(
+                                 row =>
+                                 XmlRdf2Format(cfRDF, row, null,  id, true,formatDictionaries.Inverses)))
+                    xResult.Add(new XElement("inverse",
+                                             new XAttribute("prop", "http://fogid.net/o/" + inversePair.Value),
+                                             inversePair.Key));
+
+                return xResult;
             }
-            return xResult;
         }
 
+         
     }
 }
